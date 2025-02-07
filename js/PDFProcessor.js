@@ -1,78 +1,158 @@
-// Create a namespace for our application
-window.PDFtoCSV = window.PDFtoCSV || {};
-
-// Define the processor class in our namespace
-window.PDFtoCSV.Processor = class {
+class PDFProcessor {
     constructor() {
-        this.reset();
-    }
-
-    reset() {
-        this.activities = [];
-        this.currentSection = '';
+        console.log('PDFProcessor initialized');
+        // Column ranges are critical for parsing
+        this.columnRanges = {
+            activityId: { start: 0, end: 100 },
+            activityName: { start: 100, end: 350 },
+            originalDuration: { start: 350, end: 450 },
+            remainingDuration: { start: 450, end: 500 },
+            startDate: { start: 500, end: 600 },
+            finishDate: { start: 600, end: 700 }
+        };
     }
 
     async processSchedule(pdfData) {
         try {
-            this.reset();
+            console.log('Processing schedule...');
             const pdf = await pdfjsLib.getDocument(pdfData).promise;
-            await this.processPages(pdf);
-            return this.formatOutput();
+            console.log('Number of pages:', pdf.numPages);
+            const scheduleData = await this.extractScheduleData(pdf);
+            return this.formatScheduleData(scheduleData);
         } catch (error) {
-            console.error('Error processing PDF:', error);
-            throw new Error('Failed to process schedule PDF');
+            console.error('Error processing schedule:', error);
+            throw error;
         }
     }
 
-    async processPages(pdf) {
+    async extractScheduleData(pdf) {
+        const activities = [];
         for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+            console.log('Processing page', pageNum);
             const page = await pdf.getPage(pageNum);
             const textContent = await page.getTextContent();
-            this.processItems(textContent.items);
-        }
-    }
-
-    // ... rest of the processor methods stay the same ...
-    processItems(items) {
-        const lines = this.groupIntoLines(items);
-        lines.forEach(line => {
-            const activity = this.parseLine(line);
-            if (activity) {
-                this.activities.push(activity);
+            console.log('Items on page:', textContent.items.length);
+            
+            // Group items by vertical position (y-coordinate)
+            const lines = this.groupItemsByLine(textContent.items);
+            console.log('Lines grouped:', lines.length);
+            
+            for (const line of lines) {
+                const activity = this.processLine(line);
+                if (activity) {
+                    activities.push(activity);
+                }
             }
-        });
+        }
+        console.log('Total activities found:', activities.length);
+        return activities;
     }
 
-    groupIntoLines(items) {
-        const lines = new Map();
-        items.forEach(item => {
+    groupItemsByLine(items) {
+        // Sort items by vertical position
+        items.sort((a, b) => b.transform[5] - a.transform[5]);
+        
+        const lines = [];
+        let currentLine = [];
+        let currentY = null;
+
+        for (const item of items) {
             const y = Math.round(item.transform[5]);
-            if (!lines.has(y)) {
-                lines.set(y, []);
+            if (currentY === null) {
+                currentY = y;
             }
-            lines.get(y).push({
-                text: item.str,
-                x: item.transform[4]
-            });
-        });
-        
-        return Array.from(lines.values())
-            .map(line => line.sort((a, b) => a.x - b.x));
+
+            if (Math.abs(y - currentY) > 2) { // Threshold for new line
+                if (currentLine.length > 0) {
+                    lines.push([...currentLine].sort((a, b) => a.transform[4] - b.transform[4]));
+                }
+                currentLine = [];
+                currentY = y;
+            }
+            currentLine.push(item);
+        }
+
+        if (currentLine.length > 0) {
+            lines.push([...currentLine].sort((a, b) => a.transform[4] - b.transform[4]));
+        }
+
+        return lines;
     }
 
-    parseLine(line) {
-        const text = line.map(item => item.text).join(' ');
-        
-        if (this.shouldSkipLine(text)) {
+    processLine(items) {
+        // Skip headers and empty lines
+        const lineText = items.map(item => item.str).join(' ');
+        if (this.shouldSkipLine(lineText)) {
             return null;
         }
 
-        const firstItem = line[0].text;
-        if (!this.isActivityId(firstItem)) {
+        // Check for activity ID pattern
+        const activityIdMatch = items.find(item => 
+            /^(MILE-|P1MILE-|LOE-|SUMM-)/.test(item.str)
+        );
+
+        if (!activityIdMatch) {
             return null;
         }
 
-        return this.extractActivity(line);
+        const activity = {
+            activityId: '',
+            activityName: '',
+            originalDuration: '',
+            remainingDuration: '',
+            startDate: '',
+            finishDate: ''
+        };
+
+        let currentField = null;
+        let lastX = 0;
+
+        for (const item of items) {
+            const x = item.transform[4];
+            const text = item.str.trim();
+
+            if (this.isActivityId(text)) {
+                activity.activityId = text;
+                currentField = 'activityName';
+                lastX = x;
+                continue;
+            }
+
+            // Determine which field this item belongs to based on x position
+            const field = this.determineField(x);
+            if (field && field !== currentField) {
+                currentField = field;
+            }
+
+            if (currentField) {
+                if (this.isDate(text)) {
+                    if (!activity.startDate) {
+                        activity.startDate = this.cleanDate(text);
+                    } else {
+                        activity.finishDate = this.cleanDate(text);
+                    }
+                } else if (currentField === 'activityName' && !this.isNumber(text)) {
+                    activity.activityName += (activity.activityName ? ' ' : '') + text;
+                } else if (this.isNumber(text)) {
+                    if (!activity.originalDuration) {
+                        activity.originalDuration = text;
+                    } else if (!activity.remainingDuration) {
+                        activity.remainingDuration = text;
+                    }
+                }
+            }
+        }
+
+        return this.validateActivity(activity) ? activity : null;
+    }
+
+    determineField(x) {
+        for (const [field, range] of Object.entries(this.columnRanges)) {
+            if (x >= range.start && x < range.end) {
+                return field;
+            }
+        }
+        return null;
     }
 
     shouldSkipLine(text) {
@@ -80,7 +160,8 @@ window.PDFtoCSV.Processor = class {
                text.includes('Duration') ||
                text.includes('PAGE') ||
                text.includes('Full WBS') ||
-               text.includes('WALTER REED');
+               text.includes('WALTER REED') ||
+               text.length < 2;
     }
 
     isActivityId(text) {
@@ -91,69 +172,31 @@ window.PDFtoCSV.Processor = class {
         return /\d{2}-[A-Za-z]{3}-\d{2}/.test(text);
     }
 
-    extractActivity(line) {
-        let activity = {
-            activityId: '',
-            activityName: '',
-            originalDuration: '',
-            remainingDuration: '',
-            startDate: '',
-            finishDate: ''
-        };
-
-        let nameStarted = false;
-        let nameEnded = false;
-
-        line.forEach(item => {
-            const text = item.text.trim();
-
-            if (!nameStarted && this.isActivityId(text)) {
-                activity.activityId = text;
-                nameStarted = true;
-                return;
-            }
-
-            if (nameStarted && !nameEnded) {
-                if (this.isNumber(text) || this.isDate(text)) {
-                    nameEnded = true;
-                } else {
-                    activity.activityName += (activity.activityName ? ' ' : '') + text;
-                    return;
-                }
-            }
-
-            if (nameEnded) {
-                if (this.isNumber(text) && !activity.originalDuration) {
-                    activity.originalDuration = text;
-                } else if (this.isNumber(text) && !activity.remainingDuration) {
-                    activity.remainingDuration = text;
-                } else if (this.isDate(text)) {
-                    if (!activity.startDate) {
-                        activity.startDate = this.cleanDate(text);
-                    } else if (!activity.finishDate) {
-                        activity.finishDate = this.cleanDate(text);
-                    }
-                }
-            }
-        });
-
-        return activity;
-    }
-
     isNumber(text) {
-        return !isNaN(text) && text.length > 0;
+        return /^\d+$/.test(text);
     }
 
     cleanDate(date) {
         return date.replace(/[*A]$/, '').trim();
     }
 
-    formatOutput() {
+    validateActivity(activity) {
+        return activity.activityId && 
+               activity.activityId.length > 0 && 
+               !activity.activityId.includes('Total');
+    }
+
+    formatScheduleData(activities) {
         const header = 'Activity ID,Activity Name,Original Duration,Remaining Duration,Start Date,Finish Date';
-        const rows = this.activities.map(activity => {
+        if (activities.length === 0) {
+            console.log('No activities found to format');
+            return header;
+        }
+
+        const rows = activities.map(activity => {
             return [
                 activity.activityId,
-                `"${activity.activityName}"`,
+                `"${activity.activityName.trim()}"`,
                 activity.originalDuration,
                 activity.remainingDuration,
                 activity.startDate,
@@ -163,4 +206,7 @@ window.PDFtoCSV.Processor = class {
 
         return header + '\n\n' + rows.join('\n');
     }
-};
+}
+
+// Make available globally
+window.PDFProcessor = PDFProcessor;

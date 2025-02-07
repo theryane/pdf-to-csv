@@ -9,7 +9,7 @@ const preview = document.getElementById('preview');
 const downloadBtn = document.getElementById('downloadBtn');
 
 // Create processor instance
-const processor = new PDFProcessor();
+const processor = new PDFtoCSV.Processor();
 
 // Disable process button initially
 processButton.disabled = true;

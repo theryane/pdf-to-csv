@@ -1,4 +1,8 @@
-class PDFProcessor {
+// Create a namespace for our application
+window.PDFtoCSV = window.PDFtoCSV || {};
+
+// Define the processor class in our namespace
+window.PDFtoCSV.Processor = class {
     constructor() {
         this.reset();
     }
@@ -28,6 +32,7 @@ class PDFProcessor {
         }
     }
 
+    // ... rest of the processor methods stay the same ...
     processItems(items) {
         const lines = this.groupIntoLines(items);
         lines.forEach(line => {
@@ -58,7 +63,6 @@ class PDFProcessor {
     parseLine(line) {
         const text = line.map(item => item.text).join(' ');
         
-        // Skip headers and non-activity lines
         if (this.shouldSkipLine(text)) {
             return null;
         }
@@ -102,7 +106,6 @@ class PDFProcessor {
 
         line.forEach(item => {
             const text = item.text.trim();
-            const x = item.x;
 
             if (!nameStarted && this.isActivityId(text)) {
                 activity.activityId = text;
@@ -160,7 +163,4 @@ class PDFProcessor {
 
         return header + '\n\n' + rows.join('\n');
     }
-}
-
-// Make available globally
-window.PDFProcessor = PDFProcessor;
+};
